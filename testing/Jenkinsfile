@@ -1,0 +1,42 @@
+// only main is tracked
+pipeline {
+    agent any
+    tools {
+        maven 'maven'
+        jdk 'jdk-8'
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                sh 'mvn clean compile'
+            }
+        }
+
+        stage('Package') {
+            steps {
+                sh 'mvn package -DskipTests'
+            }
+        }
+        stage('E2E Test') {
+            steps {
+                // use dependency:get to pull version 99-SNAPSHOT of analytics and telemetry
+                sh 'mvn dependency:get -Dartifact=com.lidar:analytics:99-SNAPSHOT -Ddest=analytics.jar'
+                sh 'mvn dependency:get -Dartifact=com.lidar:telemetry:99-SNAPSHOT -Ddest=telemetry.jar'
+                sh 'ls -la'
+                sh 'java -cp target/simulator-99-SNAPSHOT.jar:analytics.jar:telemetry.jar com.lidar.simulation.Simulator'
+            }
+        }
+        stage('Publish') {
+            steps {
+                sh 'mvn deploy -DskipTests'
+            }
+        }
+    }
+
+    post {
+        cleanup {
+            cleanWs()
+        }
+    }
+}

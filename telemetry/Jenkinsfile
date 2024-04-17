@@ -1,0 +1,115 @@
+def nextVersion
+
+pipeline {
+    agent any
+    tools {
+        maven 'maven'
+        jdk 'jdk-8'
+    }
+    stages {
+        stage('Version') {
+            when {
+                anyOf {
+                    branch 'release/*'
+                }
+            }
+
+            environment {
+                BRANCH_VERSION = "${env.BRANCH_NAME.tokenize('/')[1]}"
+            }
+
+            steps {
+                sh 'git fetch --tags'
+
+                script {
+                    def latestVersion = sh(returnStdout: true, script: "git tag -l --sort=version:refname \"${BRANCH_VERSION}.*\" | tail -1 || echo 'none'").trim()
+                    patchNumber = 0
+
+                    if (latestVersion != 'none') {
+                        def parts = latestVersion.tokenize('.')
+                        if (parts.size() > 2) {
+                            patchNumber = parts[2].toInteger()
+                        }
+                        patchNumber++
+                    }
+
+                    nextVersion = "${BRANCH_VERSION}.${patchNumber}"
+                    sh "mvn versions:set -DnewVersion=${nextVersion}"
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                sh 'mvn clean compile'
+            }
+        }
+        stage('Unit Test') {
+            when {
+                anyOf {
+                    branch 'release/*'
+                    branch 'feature/*'
+                }
+            }
+            steps {
+                sh 'mvn test'
+            }
+        }
+        stage('Package') {
+            steps {
+                sh 'mvn package -DskipTests'
+            }
+        }
+        stage('E2E Test') {
+            when {
+                anyOf {
+                    // branch 'release/*' // remove me once tests are done
+                    branch 'main'
+                    allOf {
+                        //  If the commit message contains "#e2e", end to end tests will also be executed using `telmetry:99-SNAPSHOT`
+                        branch 'feature/*'
+                        expression {
+                            def commitMessage = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+                            return commitMessage.contains('#e2e') //commit feat test
+                        }
+                    }
+                }
+            }
+            steps {
+                script {
+                    def VERSION = env.BRANCH_NAME.startsWith('release/') ? env.BRANCH_NAME.tokenize('/')[1] : '99-SNAPSHOT'
+
+                    withCredentials([usernamePassword(credentialsId: 'jf2', usernameVariable: 'USR', passwordVariable: 'PWD')]) {
+                        sh "./fetch_latest.sh $USR $PWD $VERSION"
+                    }
+                    sh 'mvn dependency:get -Dartifact=com.lidar:simulator:99-SNAPSHOT -Ddest=simulator.jar'
+                    sh 'cp target/*.jar  telemetry.jar'
+                    sh 'java -cp telemetry.jar:analytics.jar:simulator.jar com.lidar.simulation.Simulator'
+                }
+            }
+        }
+        stage('Publish') {
+            when {
+                anyOf {
+                    branch 'release/*'
+                    branch 'main'
+                }
+            }
+            steps {
+                sh 'mvn deploy -DskipTests'
+
+                script {
+                    if (env.BRANCH_NAME.startsWith('release/')) {
+                            sh "git clean -f && git tag -a ${nextVersion} -m 'Release ${nextVersion}'"
+                            sh 'git push origin --tags'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        cleanup {
+            cleanWs()
+        }
+    }
+}

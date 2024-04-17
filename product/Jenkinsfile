@@ -1,0 +1,85 @@
+// only release/* is tracked in this pipeline
+
+def nextVersion
+
+pipeline {
+    agent any
+    tools {
+        maven 'maven'
+        jdk 'jdk-8'
+    }
+
+    stages {
+        stage('Version') {
+            environment {
+                BRANCH_VERSION = "${env.BRANCH_NAME.tokenize('/')[1]}" // 1.2
+                MAJOR = "${BRANCH_VERSION.tokenize('.')[0]}" // 1
+                MINOR = "${BRANCH_VERSION.tokenize('.')[1]}" //2
+                NEXT_MINOR = (MINOR.toInteger() + 1).toString() // 3
+                VERSION_RANGE = "[${MAJOR}.${MINOR},${MAJOR}.${NEXT_MINOR})" // [1.2,1.3)
+            }
+
+            steps {
+                sh 'git fetch --tags'
+
+                script {
+                    def latestVersion = sh(returnStdout: true, script: "git tag -l --sort=version:refname \"${BRANCH_VERSION}.*\" | tail -1 || echo 'none'").trim()
+                    patchNumber = 0
+
+                    if (latestVersion != 'none') {
+                        def parts = latestVersion.tokenize('.')
+                        if (parts.size() > 2) {
+                            patchNumber = parts[2].toInteger()
+                        }
+                        patchNumber++
+                    }
+
+                    nextVersion = "${BRANCH_VERSION}.${patchNumber}"
+                    sh "mvn versions:set -DnewVersion=${nextVersion}"
+                    sh """mvn versions:set-property -Dproperty=telemetry.version -DnewVersion='${VERSION_RANGE}'""" // []
+                    sh """mvn versions:set-property -Dproperty=analytics.version -DnewVersion='${VERSION_RANGE}'"""
+                }
+            }
+        }
+        stage('Build') {
+            steps {
+                sh 'mvn clean compile'
+            }
+        }
+        stage('Unit Test') {
+            steps {
+                sh 'mvn test'
+            }
+        }
+        stage('Package') {
+            steps {
+                sh 'mvn package -DskipTests'
+            }
+        }
+        stage('E2E Test') {
+            environment {
+                BRANCH_VERSION = "${env.BRANCH_NAME.tokenize('/')[1]}"
+            }
+            steps {
+                // TODO - SET GET LATEST Z VERSION OF x.y
+                sh 'mvn dependency:get -Dartifact=com.lidar:simulator:99-SNAPSHOT -Ddest=simulator.jar'
+                sh 'find ./target -name "*.zip" -exec sh -c "unzip -j {} *telemetry*.jar -d ./ && mv telemetry*.jar telemetry.jar" \\;'
+                sh 'find ./target -name "*.zip" -exec sh -c "unzip -j {} *analytics*.jar -d ./ && mv analytics*.jar analytics.jar" \\;' //[1.1,1.2) -> 1.1 >= x < 1.2
+                sh 'java -cp analytics.jar:telemetry.jar:simulator.jar com.lidar.simulation.Simulator'
+            }
+        }
+        stage('Publish') {
+            steps {
+                sh 'mvn deploy -DskipTests'
+                sh "git clean -f && git tag -a ${nextVersion} -m 'Release ${nextVersion}'"
+                sh "git push origin ${nextVersion}"
+            }
+        }
+    }
+
+    post {
+        cleanup {
+            cleanWs()
+        }
+    }
+}
